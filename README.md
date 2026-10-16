@@ -5,16 +5,25 @@ model being detected as **Krea 2** (`krea-2` / `krea-2/lora`) and does nothing o
 
 Three features, each living in its own nested sub-group under the **Krea Gone Wild** parameter
 group. Each sub-group's **toggle is the feature's on/off switch** — there is no separate enable
-param. Install buttons appear inside the sub-group of whichever node pack is missing. KGW Rebalance
-requires nova452's pack. RedNodeAI's pack is an optional second button in that same group.
+param. Install buttons appear inside the sub-group of whichever required node pack is missing.
+KGW Rebalance requires nova452's pack. True renormalize is separate: it needs a node that provides
+class `Krea2Rebalance`, and that node has no install button. See [Rebalance-only extract](#rebalance-only-extract).
 
 ## 1. KGW Rebalance
 
 Reweights the 12 Qwen3-VL taps packed into Krea 2 conditioning, on the positive and negative
 prompts (and the refiner pass, if present). The group requires
 [nova452/ComfyUI-ConditioningKrea2Rebalance](https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance).
-[RedNodeAI/ComfyUI-Krea2Moodboard](https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard) is optional
-and supplies the measured-RMS node.
+
+True renormalize needs a backend node that provides class `Krea2Rebalance`, with inputs
+`conditioning`, `preset`, `per_layer_weights`, `multiplier`, and `renormalize`. The recommended
+source is a rebalance-only extract of RedNodeAI's `rebalance.py` in `custom_nodes` (no core
+patches). Installing the full
+[RedNodeAI/ComfyUI-Krea2Moodboard](https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard) pack also
+provides that class, but loading it monkeypatches core Krea 2 functions globally: it replaces
+`SingleStreamDiT._forward`, `Krea2` `model_base.extra_conds` and `extra_conds_shapes`,
+`Krea2TEModel.encode_token_weights`, and `Qwen3VL.preprocess_embed`. Those patches apply as soon
+as the pack loads.
 
 **KGW per_layer_weights** sets the ratio between taps. **KGW Renormalize** (on by default) then
 holds the conditioning magnitude, and **KGW Multiplier** is a gain on top of that (1 holds the
@@ -23,7 +32,7 @@ dimension (tokens and taps together). It is not per-token and not per-layer.
 
 What gets emitted:
 
-- **Renormalize on, and `Krea2Rebalance` is on the backend.** RedNodeAI's `Krea2Rebalance` with
+- **Renormalize on, and `Krea2Rebalance` is on the backend.** Class `Krea2Rebalance` with
   `preset` `custom`, your per-layer weights, your multiplier, and `renormalize` true. The node
   captures each batch row's RMS before the weights, applies the per-tap gains, rescales to that
   captured RMS, then multiplies by **KGW Multiplier**. A stored multiplier M is M times the
@@ -35,20 +44,16 @@ What gets emitted:
   back to nova452's node and folds in the equal-energy estimate `k = sqrt(mean(weight²))` as
   `multiplier / k`. That equals a measured RMS renormalize when the taps have the same mean
   square. When they do not, `k` is only an approximation, because the real ratio depends on the
-  prompt. The first time this fallback runs, a log warning names the missing RedNodeAI pack and
-  its repo URL.
+  prompt. The first time this fallback runs, a log warning points here, at
+  [Rebalance-only extract](#rebalance-only-extract).
 
-The RedNodeAI pack is a deliberate install. Loading it monkeypatches core Krea 2 functions
-globally: it replaces `SingleStreamDiT._forward`, `Krea2` `model_base.extra_conds` and
-`extra_conds_shapes`, `Krea2TEModel.encode_token_weights`, and `Qwen3VL.preprocess_embed`. Those
-patches apply as soon as the pack loads. The rebalance group stays gated on nova452's node, so
-renormalize-off and the fallback both work without the RedNodeAI pack. The install button in the
-group does not block generation.
+The rebalance group stays gated on nova452's node, so renormalize-off and the fallback both work
+without `Krea2Rebalance`. nova452's install button does not block generation.
 
 - Toggle the **KGW Rebalance** group on to enable it.
-- **KGW Multiplier** — gain on the original RMS when renormalize is on and `Krea2Rebalance` is
-  installed (default **1**). When renormalize is off, this is the original global multiplier and
-  it stacks with the per-layer weights.
+- **KGW Multiplier** — gain on the original RMS when renormalize is on and a `Krea2Rebalance`
+  node is on the backend (default **1**). When renormalize is off, this is the original global
+  multiplier and it stacks with the per-layer weights.
 - **KGW Renormalize** — on by default.
 - **KGW per_layer_weights** — comma-separated weights for the 12 conditioning layers.
   Default `1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0`.
@@ -70,7 +75,7 @@ gain is `multiplier × k`. With true renormalize on, the gain is the stored mult
 | 1 (default) | 1 × 2.1691 ≈ **2.17×** | **1×** the original RMS |
 
 The per-layer ratios are the same in both columns. Only the overall magnitude changes. The
-fallback (renormalize on, RedNodeAI pack missing) aims at the right-hand column when the taps
+fallback (renormalize on, `Krea2Rebalance` missing) aims at the right-hand column when the taps
 have equal energy, and only approximates it when they do not.
 
 - Clean renormalized look: renormalize on, multiplier **1**. That holds the measured RMS.
@@ -79,6 +84,34 @@ have equal energy, and only approximates it when they do not.
   That is a real amplification. Values above 1 can oversaturate.
 - Match the old node exactly, including unequal tap energies: renormalize **off**, multiplier
   **4** or **2** as the preset already stores.
+
+### Rebalance-only extract
+
+True renormalize needs class `Krea2Rebalance` on the ComfyUI backend. SwarmUI detects that class
+as feature `krea2_rednode_rebalance`. There is no install button for it.
+
+1. In the ComfyUI install this SwarmUI uses, make a folder under `custom_nodes`. The name is
+   yours. `ComfyUI-Krea2Rebalance-RedNode` is a fine one.
+2. Copy `rebalance.py` from
+   [RedNodeAI/ComfyUI-Krea2Moodboard](https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard) at
+   commit [`ffa2cd4`](https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard/blob/ffa2cd4327f02a31105291b93a711d43e2b86c48/rebalance.py)
+   into that folder. Copy the file as-is.
+3. Add `__init__.py` next to it, exporting only that class:
+
+```python
+from .rebalance import Krea2Rebalance
+
+NODE_CLASS_MAPPINGS = {"Krea2Rebalance": Krea2Rebalance}
+```
+
+Restart the ComfyUI backend so SwarmUI sees the node. This folder does not patch core Krea 2.
+Do not install the full RedNodeAI pack unless you want those global patches.
+
+`rebalance.py` is RedNodeAI's file and stays under [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html).
+The mechanic it reimplements is Apache-2.0, from
+[nova452/ComfyUI-ConditioningKrea2Rebalance](https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance)
+and the RMS-renormalized variant in
+[huwhitememes/comfyui-krea2-conditioning](https://github.com/huwhitememes/comfyui-krea2-conditioning).
 
 ## 2. KGW Ostris Edit
 
@@ -154,8 +187,9 @@ prompt image SwarmUI batched, one vision block each.
 
 ## Usage
 
-1. Install the required ComfyUI node(s) using the button in the matching sub-group, then restart the
-   ComfyUI backend when prompted.
+1. Install the required ComfyUI node pack using the button in the matching sub-group, then restart
+   the ComfyUI backend when prompted. For true renormalize, add the
+   [rebalance-only extract](#rebalance-only-extract) instead of installing the full RedNodeAI pack.
 2. Select a Krea 2 model.
 3. Toggle on the sub-group(s) you want (and, for either editing mode, add a prompt image + the
    matching edit LoRA).

@@ -15,9 +15,10 @@ public class KreaGoneWildExtension : Extension
     public const string RebalanceFeatureFlag = "conditioning_krea2_rebalance";
     public const string RebalanceNodeName = "ConditioningKrea2Rebalance";
     public const string RebalanceRepoUrl = "https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance";
-    /// <summary>RedNodeAI's measured-RMS node. Optional. The rebalance group stays gated on <see cref="RebalanceFeatureFlag"/>.</summary>
+    /// <summary>Set when a backend node provides class <see cref="RedNodeRebalanceNodeName"/>. The rebalance group stays gated on <see cref="RebalanceFeatureFlag"/>.</summary>
     public const string RedNodeRebalanceFeatureFlag = "krea2_rednode_rebalance";
     public const string RedNodeRebalanceNodeName = "Krea2Rebalance";
+    /// <summary>Credit link for the full pack. Not registered as an install: loading that pack monkeypatches core Krea 2.</summary>
     public const string RedNodeRebalanceRepoUrl = "https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard";
     public const string DefaultPerLayerWeights = "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0";
     /// <summary>Krea 2 packs 12 Qwen3-VL taps of 2560 into the conditioning's last dimension (30720).</summary>
@@ -72,14 +73,6 @@ public class KreaGoneWildExtension : Extension
             RebalanceRepoUrl,
             "nova452"
         ));
-        // AutoInstall stays false, and no rebalance param uses this flag, so a missing pack never refuses a backend.
-        InstallableFeatures.RegisterInstallableFeature(new(
-            "Krea 2 RedNode Rebalance",
-            RedNodeRebalanceFeatureFlag,
-            RedNodeRebalanceRepoUrl,
-            "RedNodeAI",
-            "This will install https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard (RedNodeAI).\nLoading that pack monkeypatches core Krea 2 functions globally: it replaces SingleStreamDiT._forward, Krea2 model_base.extra_conds and extra_conds_shapes, Krea2TEModel.encode_token_weights, and Qwen3VL.preprocess_embed.\nThose patches apply as soon as the pack loads, even if you only wanted the rebalance node.\nKGW Rebalance still runs without it.\nDo you wish to install?"
-        ));
         InstallableFeatures.RegisterInstallableFeature(new(
             "Krea 2 Ostris Edit",
             EditFeatureFlag,
@@ -110,7 +103,7 @@ public class KreaGoneWildExtension : Extension
             IsAdvanced: false,
             OrderPriority: 0,
             Parent: KreaGoneWildGroup,
-            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nKGW Renormalize holds the measured conditioning RMS after the layer weights when RedNodeAI's Krea2Rebalance is installed, then KGW Multiplier is a gain on that RMS. Without that node it falls back to an equal-energy estimate on nova452's node. Turn KGW Renormalize off to run nova452's original node.\nToggle this group on to enable it. The group requires nova452's pack. The RedNodeAI pack is optional.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>\n<a target=\"_blank\" href=\"{RedNodeRebalanceRepoUrl}\">RedNodeAI/ComfyUI-Krea2Moodboard</a>"
+            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nTrue renormalize needs a node that provides class Krea2Rebalance (inputs conditioning, preset, per_layer_weights, multiplier, renormalize). KGW Renormalize then holds the measured conditioning RMS after the layer weights, and KGW Multiplier is a gain on that RMS. Without that node it falls back to an equal-energy estimate on nova452's node. Turn KGW Renormalize off to run nova452's original node.\nThe recommended source is a rebalance-only extract of RedNodeAI's rebalance.py in custom_nodes (no core patches). The full RedNodeAI/ComfyUI-Krea2Moodboard pack also provides the node, but loading it monkeypatches core Krea 2 globally. See the extension README, section \"Rebalance-only extract\".\nToggle this group on to enable it. The group requires nova452's pack.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>\n<a target=\"_blank\" href=\"{RedNodeRebalanceRepoUrl}\">RedNodeAI/ComfyUI-Krea2Moodboard</a>"
         );
 
         OstrisEditGroup = new T2IParamGroup(
@@ -137,7 +130,7 @@ public class KreaGoneWildExtension : Extension
 
         Multiplier = T2IParamTypes.Register<double>(new T2IParamType(
             Name: "KGW Multiplier",
-            Description: "Gain applied after the per-layer weights.\nWith KGW Renormalize on and RedNodeAI's Krea2Rebalance installed, this multiplies the original conditioning RMS: 1 holds that RMS. A stored 4 is 4× it. The old nova452 node at the default weights was about 8.68× RMS at multiplier 4 and about 4.34× at multiplier 2, so use about 8.68 or 4.34 to match that old magnitude.\nWith KGW Renormalize on but Krea2Rebalance missing, those same numbers go through an equal-energy estimate on nova452's node. That estimate matches a measured RMS renormalize when the taps have equal energy.\nWith KGW Renormalize off, this is nova452's original global multiplier (that node defaults to 4) and it stacks on the per-layer weights.\nPresets that store 2 or 4 keep those stored numbers.",
+            Description: "Gain applied after the per-layer weights.\nWith KGW Renormalize on and a backend node providing class Krea2Rebalance (inputs conditioning, preset, per_layer_weights, multiplier, renormalize), this multiplies the original conditioning RMS: 1 holds that RMS. A stored 4 is 4× it. The old nova452 node at the default weights was about 8.68× RMS at multiplier 4 and about 4.34× at multiplier 2, so use about 8.68 or 4.34 to match that old magnitude.\nWith KGW Renormalize on but that node missing, those same numbers go through an equal-energy estimate on nova452's node. That estimate matches a measured RMS renormalize when the taps have equal energy.\nWith KGW Renormalize off, this is nova452's original global multiplier (that node defaults to 4) and it stacks on the per-layer weights.\nPresets that store 2 or 4 keep those stored numbers.\nRecommended source: a rebalance-only extract of RedNodeAI's rebalance.py in custom_nodes (no core patches). The full ComfyUI-Krea2Moodboard pack also provides the node and monkeypatches core Krea 2.",
             Default: "1.00",
             Min: -1, Max: 50, Step: 0.5,
             ViewMin: -1, ViewMax: 50,
@@ -150,7 +143,7 @@ public class KreaGoneWildExtension : Extension
         // 0.5 sits between Multiplier (0) and per_layer_weights (1) without shifting any later param.
         Renormalize = T2IParamTypes.Register<bool>(new T2IParamType(
             Name: "KGW Renormalize",
-            Description: "After the per-layer weights, rescale each batch row so its RMS matches the conditioning that went in, then apply KGW Multiplier. The scale is one number per batch row, over every other dimension. Pooled output is not scaled.\nOn emits RedNodeAI's Krea2Rebalance with preset custom, these per-layer weights, this multiplier, and renormalize true, when that node is on the backend.\nIf that node is missing, generation still runs: nova452's ConditioningKrea2Rebalance gets multiplier divided by k = sqrt(mean of the squared weights), and a one-time log warning names the missing pack.\nOff emits nova452's ConditioningKrea2Rebalance with the multiplier unchanged.\nInstalling https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard is optional. Loading that pack monkeypatches core Krea 2 functions globally: it replaces SingleStreamDiT._forward, Krea2 model_base.extra_conds and extra_conds_shapes, Krea2TEModel.encode_token_weights, and Qwen3VL.preprocess_embed.",
+            Description: "After the per-layer weights, rescale each batch row so its RMS matches the conditioning that went in, then apply KGW Multiplier. The scale is one number per batch row, over every other dimension. Pooled output is not scaled.\nOn emits class Krea2Rebalance with preset custom, these per-layer weights, this multiplier, and renormalize true, when a backend node provides that class (inputs conditioning, preset, per_layer_weights, multiplier, renormalize).\nIf that node is missing, generation still runs: nova452's ConditioningKrea2Rebalance gets multiplier divided by k = sqrt(mean of the squared weights), and a one-time log warning points at the README section \"Rebalance-only extract\".\nOff emits nova452's ConditioningKrea2Rebalance with the multiplier unchanged.\nRecommended source: a rebalance-only extract of RedNodeAI's rebalance.py in custom_nodes (no core patches). The full ComfyUI-Krea2Moodboard pack also provides the node, but loading it monkeypatches core Krea 2 globally.",
             Default: "true",
             Group: RebalanceGroup,
             FeatureFlag: RebalanceFeatureFlag,
@@ -499,9 +492,9 @@ public class KreaGoneWildExtension : Extension
     }
 
     /// <summary>RMS is one scale per batch row, over every other dimension (tokens and taps together). Pooled output is left alone.
-    /// Renormalize on and <paramref name="redNodeAvailable"/>: RedNodeAI's <c>Krea2Rebalance</c>, preset <c>custom</c>, measured RMS, then <paramref name="multiplier"/>.
+    /// Renormalize on and <paramref name="redNodeAvailable"/>: class <c>Krea2Rebalance</c>, preset <c>custom</c>, measured RMS, then <paramref name="multiplier"/>.
     /// Renormalize off: nova452's <c>ConditioningKrea2Rebalance</c> with <paramref name="multiplier"/> unchanged.
-    /// Renormalize on and the RedNode node missing: nova452's node with <paramref name="multiplier"/> / k, and a one-time warning.</summary>
+    /// Renormalize on and that node missing: nova452's node with <paramref name="multiplier"/> / k, and a one-time warning.</summary>
     internal static JArray CreateRebalanceNode(WorkflowBridge bridge, JArray conditioning, double multiplier, string perLayerWeights, bool renormalize, bool redNodeAvailable)
     {
         if (renormalize && redNodeAvailable)
@@ -521,7 +514,7 @@ public class KreaGoneWildExtension : Extension
             nodeMultiplier = multiplier / k;
             if (Interlocked.Exchange(ref RenormApproxAnnounced, 1) == 0)
             {
-                Logs.Warning($"Krea Gone Wild: KGW Renormalize is on, but RedNodeAI's {RedNodeRebalanceNodeName} node is not on this backend (pack {RedNodeRebalanceRepoUrl}). Falling back to nova452's {RebalanceNodeName} with equal-energy k = sqrt(mean of squared per-layer weights) folded into the multiplier. This matches a measured RMS renormalize when the taps have equal energy, and approximates it when they do not. Pooled output is not scaled.");
+                Logs.Warning($"Krea Gone Wild: KGW Renormalize is on, but no backend node provides class {RedNodeRebalanceNodeName} (inputs conditioning, preset, per_layer_weights, multiplier, renormalize). Falling back to nova452's {RebalanceNodeName} with equal-energy k = sqrt(mean of squared per-layer weights) folded into the multiplier. This matches a measured RMS renormalize when the taps have equal energy, and approximates it when they do not. Pooled output is not scaled. For a true renormalize, add a rebalance-only extract of RedNodeAI's rebalance.py (no core patches). See the SwarmUI-KreaGoneWild README, section \"Rebalance-only extract\".");
             }
             Logs.Debug($"Krea Gone Wild: renormalize fallback equal-energy k={k.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}, node multiplier={nodeMultiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)} (user gain {multiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}).");
         }
