@@ -16,8 +16,12 @@ public class KreaGoneWildExtension : Extension
     public const string RebalanceNodeName = "ConditioningKrea2Rebalance";
     public const string RebalanceRepoUrl = "https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance";
     public const string DefaultPerLayerWeights = "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0";
+    /// <summary>Krea 2 packs 12 Qwen3-VL taps of 2560 into the conditioning's last dimension (30720).</summary>
+    internal const int Krea2FeatureDim = 12 * 2560;
     public static T2IRegisteredParam<double> Multiplier;
+    public static T2IRegisteredParam<bool> Renormalize;
     public static T2IRegisteredParam<string> PerLayerWeights;
+    private static int RenormApproxAnnounced;
 
     public const string EditFeatureFlag = "krea2_ostris_edit";
     public const string EditModelPatchNodeName = "Krea2OstrisEditModelPatch";
@@ -93,7 +97,7 @@ public class KreaGoneWildExtension : Extension
             IsAdvanced: false,
             OrderPriority: 0,
             Parent: KreaGoneWildGroup,
-            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nToggle this group on to enable it.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>"
+            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nKGW Renormalize holds the conditioning RMS after the layer weights, then KGW Multiplier is a gain on top.\nToggle this group on to enable it.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>"
         );
 
         OstrisEditGroup = new T2IParamGroup(
@@ -120,14 +124,24 @@ public class KreaGoneWildExtension : Extension
 
         Multiplier = T2IParamTypes.Register<double>(new T2IParamType(
             Name: "KGW Multiplier",
-            Description: "Overall multiplier applied to Krea 2 conditioning.",
-            Default: "4.00",
+            Description: "Gain applied after the per-layer weights.\nWith KGW Renormalize on, 1 holds the conditioning RMS and higher values amplify the rebalanced signal.\nWith KGW Renormalize off, this is the original node's global multiplier (that node defaults to 4) and it stacks on the per-layer weights.\nPresets that store 2 or 4 keep those numbers. With Renormalize left on, a stored 4 is a 4× gain where the old node was ~8.7× RMS at the default weights (stored 2 was ~4.3×, now 2×). Use about 8.7 or 4.3 to approximate that old magnitude, or turn Renormalize off to match the old node.",
+            Default: "1.00",
             Min: -1, Max: 50, Step: 0.5,
             ViewMin: -1, ViewMax: 50,
             ViewType: ParamViewType.SLIDER,
             Group: RebalanceGroup,
             FeatureFlag: RebalanceFeatureFlag,
             OrderPriority: OrderPriority++
+        ));
+
+        // 0.5 sits between Multiplier (0) and per_layer_weights (1) without shifting any later param.
+        Renormalize = T2IParamTypes.Register<bool>(new T2IParamType(
+            Name: "KGW Renormalize",
+            Description: "After the per-layer weights, rescale so the conditioning RMS matches the input, then apply KGW Multiplier as a gain. Pooled output is not scaled.\nOn is the quality-preserving mode. Off runs the original node, where the weights and the multiplier both amplify.\nThe installed node has no renormalize input, and ComfyUI core has no node that can divide a conditioning by its measured RMS, so the rescale uses k = sqrt(mean of the squared weights). That matches a real RMS renormalize when the taps have equal energy, and approximates it when they do not.",
+            Default: "true",
+            Group: RebalanceGroup,
+            FeatureFlag: RebalanceFeatureFlag,
+            OrderPriority: 0.5
         ));
 
         PerLayerWeights = T2IParamTypes.Register<string>(new T2IParamType(
@@ -257,9 +271,10 @@ public class KreaGoneWildExtension : Extension
         }
         double multiplier = generator.UserInput.Get(Multiplier);
         string perLayerWeights = generator.UserInput.Get(PerLayerWeights);
+        bool renormalize = generator.UserInput.Get(Renormalize, true);
         using WorkflowBridge bridge = BridgeSync.For(generator);
-        generator.FinalPrompt = CreateRebalanceNode(bridge, generator.FinalPrompt, multiplier, perLayerWeights);
-        generator.FinalNegativePrompt = CreateRebalanceNode(bridge, generator.FinalNegativePrompt, multiplier, perLayerWeights);
+        generator.FinalPrompt = CreateRebalanceNode(bridge, generator.FinalPrompt, multiplier, perLayerWeights, renormalize);
+        generator.FinalNegativePrompt = CreateRebalanceNode(bridge, generator.FinalNegativePrompt, multiplier, perLayerWeights, renormalize);
     }
 
     private static void ApplyRefinerConditioningRebalance(WorkflowGenerator generator)
@@ -279,11 +294,12 @@ public class KreaGoneWildExtension : Extension
         }
         double multiplier = generator.UserInput.Get(Multiplier);
         string perLayerWeights = generator.UserInput.Get(PerLayerWeights);
+        bool renormalize = generator.UserInput.Get(Renormalize, true);
         JArray positiveNode, negativeNode;
         using (WorkflowBridge bridge = BridgeSync.For(generator))
         {
-            positiveNode = CreateRebalanceNode(bridge, (JArray)positive.DeepClone(), multiplier, perLayerWeights);
-            negativeNode = CreateRebalanceNode(bridge, (JArray)negative.DeepClone(), multiplier, perLayerWeights);
+            positiveNode = CreateRebalanceNode(bridge, (JArray)positive.DeepClone(), multiplier, perLayerWeights, renormalize);
+            negativeNode = CreateRebalanceNode(bridge, (JArray)negative.DeepClone(), multiplier, perLayerWeights, renormalize);
         }
         inputs["positive"] = positiveNode;
         inputs["negative"] = negativeNode;
@@ -467,13 +483,84 @@ public class KreaGoneWildExtension : Extension
         return WorkflowBridge.ToPath(encode.LATENT);
     }
 
-    internal static JArray CreateRebalanceNode(WorkflowBridge bridge, JArray conditioning, double multiplier, string perLayerWeights)
+    /// <summary>RMS is one scale per batch row, over every other dimension (tokens and taps together).
+    /// Both reference nodes (huwhitememes, RedNodeAI) do that and leave pooled output alone.
+    /// nova452 applies <c>per-layer weights, then one constant multiplier</c>, and also leaves pooled output alone.
+    /// Core ComfyUI's <c>ConditioningMultiply</c> is a constant and it scales pooled output, so it cannot do this.</summary>
+    internal static JArray CreateRebalanceNode(WorkflowBridge bridge, JArray conditioning, double multiplier, string perLayerWeights, bool renormalize)
     {
+        double nodeMultiplier = multiplier;
+        if (renormalize)
+        {
+            double k = EqualEnergyRmsRatio(perLayerWeights);
+            nodeMultiplier = multiplier / k;
+            if (Interlocked.Exchange(ref RenormApproxAnnounced, 1) == 0)
+            {
+                Logs.Warning("Krea Gone Wild: KGW Renormalize uses an equal-energy estimate k = sqrt(mean of squared per-layer weights), folded into ConditioningKrea2Rebalance's multiplier. ComfyUI core cannot rescale conditioning by its measured RMS, and the installed node has no renormalize input. This matches an RMS renormalize when the taps have equal energy, and approximates it when they do not. Pooled output is not scaled.");
+            }
+            Logs.Debug($"Krea Gone Wild: renormalize equal-energy k={k.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}, node multiplier={nodeMultiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)} (user gain {multiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}).");
+        }
         ConditioningKrea2RebalanceNode node = bridge.AddNode(new ConditioningKrea2RebalanceNode().With(
-            Multiplier: multiplier,
+            Multiplier: nodeMultiplier,
             PerLayerWeights: perLayerWeights));
         node.ConditioningInput.ConnectFromPath(bridge, conditioning);
         return WorkflowBridge.ToPath(node.Conditioning);
+    }
+
+    /// <summary>sqrt(mean(w^2)), or 1 when nova452 would ignore the weights or the weights are ~0.
+    /// 1 keeps the multiplier finite: all-zero weights already produce a zero tensor.</summary>
+    internal static double EqualEnergyRmsRatio(string perLayerWeights)
+    {
+        if (!TryParseLayerWeights(perLayerWeights, out double[] weights))
+        {
+            return 1;
+        }
+        if (weights.Length == 0 || Krea2FeatureDim % weights.Length != 0)
+        {
+            return 1;
+        }
+        double sumSq = 0;
+        foreach (double w in weights)
+        {
+            sumSq += w * w;
+        }
+        double meanSq = sumSq / weights.Length;
+        if (meanSq < 1e-16)
+        {
+            return 1;
+        }
+        return Math.Sqrt(meanSq);
+    }
+
+    /// <summary>Same acceptance rule as nova452 <c>_parse_floats</c>: comma or semicolon separated, at least two numbers.</summary>
+    internal static bool TryParseLayerWeights(string text, out double[] weights)
+    {
+        weights = null;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+        string[] parts = text.Trim().Replace(';', ',').Split(',');
+        List<double> vals = [];
+        foreach (string part in parts)
+        {
+            string piece = part.Trim();
+            if (piece.Length == 0)
+            {
+                continue;
+            }
+            if (!double.TryParse(piece, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double value))
+            {
+                return false;
+            }
+            vals.Add(value);
+        }
+        if (vals.Count < 2)
+        {
+            return false;
+        }
+        weights = [.. vals];
+        return true;
     }
 
     internal static JArray CreateReferenceLatent(WorkflowBridge bridge, JArray image, JArray vae, double megapixels)
