@@ -15,6 +15,10 @@ public class KreaGoneWildExtension : Extension
     public const string RebalanceFeatureFlag = "conditioning_krea2_rebalance";
     public const string RebalanceNodeName = "ConditioningKrea2Rebalance";
     public const string RebalanceRepoUrl = "https://github.com/nova452/ComfyUI-ConditioningKrea2Rebalance";
+    /// <summary>RedNodeAI's measured-RMS node. Optional. The rebalance group stays gated on <see cref="RebalanceFeatureFlag"/>.</summary>
+    public const string RedNodeRebalanceFeatureFlag = "krea2_rednode_rebalance";
+    public const string RedNodeRebalanceNodeName = "Krea2Rebalance";
+    public const string RedNodeRebalanceRepoUrl = "https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard";
     public const string DefaultPerLayerWeights = "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0";
     /// <summary>Krea 2 packs 12 Qwen3-VL taps of 2560 into the conditioning's last dimension (30720).</summary>
     internal const int Krea2FeatureDim = 12 * 2560;
@@ -59,6 +63,7 @@ public class KreaGoneWildExtension : Extension
         ComfyTyped.Generated.NodeRegistrations.EnsureRegistered();
         Generated.NodeRegistrations.EnsureRegistered();
         ComfyUIBackendExtension.NodeToFeatureMap[RebalanceNodeName] = RebalanceFeatureFlag;
+        ComfyUIBackendExtension.NodeToFeatureMap[RedNodeRebalanceNodeName] = RedNodeRebalanceFeatureFlag;
         ComfyUIBackendExtension.NodeToFeatureMap[EditModelPatchNodeName] = EditFeatureFlag;
         ComfyUIBackendExtension.NodeToFeatureMap[InContextModelPatchNodeName] = InContextFeatureFlag;
         InstallableFeatures.RegisterInstallableFeature(new(
@@ -66,6 +71,14 @@ public class KreaGoneWildExtension : Extension
             RebalanceFeatureFlag,
             RebalanceRepoUrl,
             "nova452"
+        ));
+        // AutoInstall stays false, and no rebalance param uses this flag, so a missing pack never refuses a backend.
+        InstallableFeatures.RegisterInstallableFeature(new(
+            "Krea 2 RedNode Rebalance",
+            RedNodeRebalanceFeatureFlag,
+            RedNodeRebalanceRepoUrl,
+            "RedNodeAI",
+            "This will install https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard (RedNodeAI).\nLoading that pack monkeypatches core Krea 2 functions globally: it replaces SingleStreamDiT._forward, Krea2 model_base.extra_conds and extra_conds_shapes, Krea2TEModel.encode_token_weights, and Qwen3VL.preprocess_embed.\nThose patches apply as soon as the pack loads, even if you only wanted the rebalance node.\nKGW Rebalance still runs without it.\nDo you wish to install?"
         ));
         InstallableFeatures.RegisterInstallableFeature(new(
             "Krea 2 Ostris Edit",
@@ -97,7 +110,7 @@ public class KreaGoneWildExtension : Extension
             IsAdvanced: false,
             OrderPriority: 0,
             Parent: KreaGoneWildGroup,
-            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nKGW Renormalize holds the conditioning RMS after the layer weights, then KGW Multiplier is a gain on top.\nToggle this group on to enable it.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>"
+            Description: $"Per-layer conditioning rebalancing for Krea 2, applied to the positive and negative prompts (and the refiner pass, if present).\nKGW Renormalize holds the measured conditioning RMS after the layer weights when RedNodeAI's Krea2Rebalance is installed, then KGW Multiplier is a gain on that RMS. Without that node it falls back to an equal-energy estimate on nova452's node. Turn KGW Renormalize off to run nova452's original node.\nToggle this group on to enable it. The group requires nova452's pack. The RedNodeAI pack is optional.\n<a target=\"_blank\" href=\"{RebalanceRepoUrl}\">nova452/ComfyUI-ConditioningKrea2Rebalance</a>\n<a target=\"_blank\" href=\"{RedNodeRebalanceRepoUrl}\">RedNodeAI/ComfyUI-Krea2Moodboard</a>"
         );
 
         OstrisEditGroup = new T2IParamGroup(
@@ -124,7 +137,7 @@ public class KreaGoneWildExtension : Extension
 
         Multiplier = T2IParamTypes.Register<double>(new T2IParamType(
             Name: "KGW Multiplier",
-            Description: "Gain applied after the per-layer weights.\nWith KGW Renormalize on, 1 holds the conditioning RMS and higher values amplify the rebalanced signal.\nWith KGW Renormalize off, this is the original node's global multiplier (that node defaults to 4) and it stacks on the per-layer weights.\nPresets that store 2 or 4 keep those numbers. With Renormalize left on, a stored 4 is a 4× gain where the old node was ~8.7× RMS at the default weights (stored 2 was ~4.3×, now 2×). Use about 8.7 or 4.3 to approximate that old magnitude, or turn Renormalize off to match the old node.",
+            Description: "Gain applied after the per-layer weights.\nWith KGW Renormalize on and RedNodeAI's Krea2Rebalance installed, this multiplies the original conditioning RMS: 1 holds that RMS. A stored 4 is 4× it. The old nova452 node at the default weights was about 8.68× RMS at multiplier 4 and about 4.34× at multiplier 2, so use about 8.68 or 4.34 to match that old magnitude.\nWith KGW Renormalize on but Krea2Rebalance missing, those same numbers go through an equal-energy estimate on nova452's node. That estimate matches a measured RMS renormalize when the taps have equal energy.\nWith KGW Renormalize off, this is nova452's original global multiplier (that node defaults to 4) and it stacks on the per-layer weights.\nPresets that store 2 or 4 keep those stored numbers.",
             Default: "1.00",
             Min: -1, Max: 50, Step: 0.5,
             ViewMin: -1, ViewMax: 50,
@@ -137,7 +150,7 @@ public class KreaGoneWildExtension : Extension
         // 0.5 sits between Multiplier (0) and per_layer_weights (1) without shifting any later param.
         Renormalize = T2IParamTypes.Register<bool>(new T2IParamType(
             Name: "KGW Renormalize",
-            Description: "After the per-layer weights, rescale so the conditioning RMS matches the input, then apply KGW Multiplier as a gain. Pooled output is not scaled.\nOn is the quality-preserving mode. Off runs the original node, where the weights and the multiplier both amplify.\nThe installed node has no renormalize input, and ComfyUI core has no node that can divide a conditioning by its measured RMS, so the rescale uses k = sqrt(mean of the squared weights). That matches a real RMS renormalize when the taps have equal energy, and approximates it when they do not.",
+            Description: "After the per-layer weights, rescale each batch row so its RMS matches the conditioning that went in, then apply KGW Multiplier. The scale is one number per batch row, over every other dimension. Pooled output is not scaled.\nOn emits RedNodeAI's Krea2Rebalance with preset custom, these per-layer weights, this multiplier, and renormalize true, when that node is on the backend.\nIf that node is missing, generation still runs: nova452's ConditioningKrea2Rebalance gets multiplier divided by k = sqrt(mean of the squared weights), and a one-time log warning names the missing pack.\nOff emits nova452's ConditioningKrea2Rebalance with the multiplier unchanged.\nInstalling https://github.com/RedNodeAI/ComfyUI-Krea2Moodboard is optional. Loading that pack monkeypatches core Krea 2 functions globally: it replaces SingleStreamDiT._forward, Krea2 model_base.extra_conds and extra_conds_shapes, Krea2TEModel.encode_token_weights, and Qwen3VL.preprocess_embed.",
             Default: "true",
             Group: RebalanceGroup,
             FeatureFlag: RebalanceFeatureFlag,
@@ -272,9 +285,10 @@ public class KreaGoneWildExtension : Extension
         double multiplier = generator.UserInput.Get(Multiplier);
         string perLayerWeights = generator.UserInput.Get(PerLayerWeights);
         bool renormalize = generator.UserInput.Get(Renormalize, true);
+        bool redNodeAvailable = generator.Features.Contains(RedNodeRebalanceFeatureFlag);
         using WorkflowBridge bridge = BridgeSync.For(generator);
-        generator.FinalPrompt = CreateRebalanceNode(bridge, generator.FinalPrompt, multiplier, perLayerWeights, renormalize);
-        generator.FinalNegativePrompt = CreateRebalanceNode(bridge, generator.FinalNegativePrompt, multiplier, perLayerWeights, renormalize);
+        generator.FinalPrompt = CreateRebalanceNode(bridge, generator.FinalPrompt, multiplier, perLayerWeights, renormalize, redNodeAvailable);
+        generator.FinalNegativePrompt = CreateRebalanceNode(bridge, generator.FinalNegativePrompt, multiplier, perLayerWeights, renormalize, redNodeAvailable);
     }
 
     private static void ApplyRefinerConditioningRebalance(WorkflowGenerator generator)
@@ -295,11 +309,12 @@ public class KreaGoneWildExtension : Extension
         double multiplier = generator.UserInput.Get(Multiplier);
         string perLayerWeights = generator.UserInput.Get(PerLayerWeights);
         bool renormalize = generator.UserInput.Get(Renormalize, true);
+        bool redNodeAvailable = generator.Features.Contains(RedNodeRebalanceFeatureFlag);
         JArray positiveNode, negativeNode;
         using (WorkflowBridge bridge = BridgeSync.For(generator))
         {
-            positiveNode = CreateRebalanceNode(bridge, (JArray)positive.DeepClone(), multiplier, perLayerWeights, renormalize);
-            negativeNode = CreateRebalanceNode(bridge, (JArray)negative.DeepClone(), multiplier, perLayerWeights, renormalize);
+            positiveNode = CreateRebalanceNode(bridge, (JArray)positive.DeepClone(), multiplier, perLayerWeights, renormalize, redNodeAvailable);
+            negativeNode = CreateRebalanceNode(bridge, (JArray)negative.DeepClone(), multiplier, perLayerWeights, renormalize, redNodeAvailable);
         }
         inputs["positive"] = positiveNode;
         inputs["negative"] = negativeNode;
@@ -483,12 +498,22 @@ public class KreaGoneWildExtension : Extension
         return WorkflowBridge.ToPath(encode.LATENT);
     }
 
-    /// <summary>RMS is one scale per batch row, over every other dimension (tokens and taps together).
-    /// Both reference nodes (huwhitememes, RedNodeAI) do that and leave pooled output alone.
-    /// nova452 applies <c>per-layer weights, then one constant multiplier</c>, and also leaves pooled output alone.
-    /// Core ComfyUI's <c>ConditioningMultiply</c> is a constant and it scales pooled output, so it cannot do this.</summary>
-    internal static JArray CreateRebalanceNode(WorkflowBridge bridge, JArray conditioning, double multiplier, string perLayerWeights, bool renormalize)
+    /// <summary>RMS is one scale per batch row, over every other dimension (tokens and taps together). Pooled output is left alone.
+    /// Renormalize on and <paramref name="redNodeAvailable"/>: RedNodeAI's <c>Krea2Rebalance</c>, preset <c>custom</c>, measured RMS, then <paramref name="multiplier"/>.
+    /// Renormalize off: nova452's <c>ConditioningKrea2Rebalance</c> with <paramref name="multiplier"/> unchanged.
+    /// Renormalize on and the RedNode node missing: nova452's node with <paramref name="multiplier"/> / k, and a one-time warning.</summary>
+    internal static JArray CreateRebalanceNode(WorkflowBridge bridge, JArray conditioning, double multiplier, string perLayerWeights, bool renormalize, bool redNodeAvailable)
     {
+        if (renormalize && redNodeAvailable)
+        {
+            Krea2RebalanceNode redNode = bridge.AddNode(new Krea2RebalanceNode().With(
+                Preset: Krea2RebalanceNode.PresetValues.Custom,
+                PerLayerWeights: perLayerWeights,
+                Multiplier: multiplier,
+                Renormalize: true));
+            redNode.Conditioning.ConnectFromPath(bridge, conditioning);
+            return WorkflowBridge.ToPath(redNode.CONDITIONING);
+        }
         double nodeMultiplier = multiplier;
         if (renormalize)
         {
@@ -496,9 +521,9 @@ public class KreaGoneWildExtension : Extension
             nodeMultiplier = multiplier / k;
             if (Interlocked.Exchange(ref RenormApproxAnnounced, 1) == 0)
             {
-                Logs.Warning("Krea Gone Wild: KGW Renormalize uses an equal-energy estimate k = sqrt(mean of squared per-layer weights), folded into ConditioningKrea2Rebalance's multiplier. ComfyUI core cannot rescale conditioning by its measured RMS, and the installed node has no renormalize input. This matches an RMS renormalize when the taps have equal energy, and approximates it when they do not. Pooled output is not scaled.");
+                Logs.Warning($"Krea Gone Wild: KGW Renormalize is on, but RedNodeAI's {RedNodeRebalanceNodeName} node is not on this backend (pack {RedNodeRebalanceRepoUrl}). Falling back to nova452's {RebalanceNodeName} with equal-energy k = sqrt(mean of squared per-layer weights) folded into the multiplier. This matches a measured RMS renormalize when the taps have equal energy, and approximates it when they do not. Pooled output is not scaled.");
             }
-            Logs.Debug($"Krea Gone Wild: renormalize equal-energy k={k.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}, node multiplier={nodeMultiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)} (user gain {multiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}).");
+            Logs.Debug($"Krea Gone Wild: renormalize fallback equal-energy k={k.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}, node multiplier={nodeMultiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)} (user gain {multiplier.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}).");
         }
         ConditioningKrea2RebalanceNode node = bridge.AddNode(new ConditioningKrea2RebalanceNode().With(
             Multiplier: nodeMultiplier,
@@ -507,7 +532,7 @@ public class KreaGoneWildExtension : Extension
         return WorkflowBridge.ToPath(node.Conditioning);
     }
 
-    /// <summary>sqrt(mean(w^2)), or 1 when nova452 would ignore the weights or the weights are ~0.
+    /// <summary>Fallback only, when <c>Krea2Rebalance</c> is missing: sqrt(mean(w^2)), or 1 when nova452 would ignore the weights or the weights are ~0.
     /// 1 keeps the multiplier finite: all-zero weights already produce a zero tensor.</summary>
     internal static double EqualEnergyRmsRatio(string perLayerWeights)
     {

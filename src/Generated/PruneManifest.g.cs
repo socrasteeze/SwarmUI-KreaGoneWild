@@ -15,6 +15,7 @@ public static class PruneManifest
         "ConditioningKrea2RebalanceNode",
         "Krea2EditModelPatchNode",
         "Krea2OstrisEditModelPatchNode",
+        "Krea2RebalanceNode",
     };
     // PRUNE-MANIFEST-END
 }
